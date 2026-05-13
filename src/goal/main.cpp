@@ -1494,7 +1494,14 @@ void GoalStrat::loop()
 #elif defined(YEAR_2026)
         m_billig->initBillig(true);
 #endif
-        m_state = State::WAIT_TIRETTE;
+        m_state = State::WAIT_TIRETTE_IN;
+        break;
+
+    case State::WAIT_TIRETTE_IN:
+        if (!m_tirette)
+        {
+            m_state = State::WAIT_TIRETTE;
+        }
         break;
     case State::WAIT_TIRETTE:
 

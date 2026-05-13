@@ -62,6 +62,7 @@ public:
     enum class State
     {
         INIT,
+        WAIT_TIRETTE_IN,
         WAIT_TIRETTE,
         RUN,
         EXIT,
