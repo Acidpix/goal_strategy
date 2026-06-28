@@ -183,3 +183,4 @@ stuck-recovery, gating, boost), read `test/test_mission_graph.cpp`.
 
 - **Boost only amplifies.** `getBoostManuelDeScore()` is added *only when the base
   score is already > 0* — a boost cannot activate a zero-score node.
+- **Two positions for a single node.** Some actions have one position for where the robot has to go (usually called goalPose), and a second position for where the action is represented on the map/rviz view (usually called area_center). Ex: in 2026, the robot takes and drops the caisses de noisettes, but its center is quite far away from the center of the garde manger: bilig, the actuator, has quite a long reach. To represent that, we use offsets, defined at the top of the constructor
