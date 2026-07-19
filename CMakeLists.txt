@@ -28,6 +28,7 @@ find_package(visualization_msgs REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(diagnostic_updater REQUIRED)
 
 include_directories(include)
 
@@ -79,6 +80,7 @@ ament_target_dependencies(goal_strategy_node
   tf2_eigen#_conversions
   tf2_ros
   tf2_geometry_msgs
+  diagnostic_updater
   #tf_conversions
   #sensor_msgs
 )
@@ -110,7 +112,7 @@ if(BUILD_TESTING)
   target_include_directories(test_goal_logic PRIVATE include)
   target_link_libraries(test_goal_logic krabilib_strat krabilib)
   ament_target_dependencies(test_goal_logic
-    rclcpp geometry_msgs tf2_eigen tf2_ros tf2_geometry_msgs)
+    rclcpp geometry_msgs tf2_eigen tf2_ros tf2_geometry_msgs diagnostic_updater)
 
   ament_add_gtest(test_geometry
     test/test_geometry.cpp
@@ -118,7 +120,7 @@ if(BUILD_TESTING)
   target_include_directories(test_geometry PRIVATE include)
   target_link_libraries(test_geometry krabilib)
   ament_target_dependencies(test_geometry
-    rclcpp geometry_msgs tf2_eigen tf2_ros tf2_geometry_msgs)
+    rclcpp geometry_msgs tf2_eigen tf2_ros tf2_geometry_msgs diagnostic_updater)
 
   # --- Tier 2: seasonal characterization of THIS YEAR's graph ---
   # The test body is guarded by YEAR_2026 (from goal.h): when the year flips it
@@ -131,7 +133,7 @@ if(BUILD_TESTING)
   target_link_libraries(test_coupe2026 krabilib_strat krabilib)
   ament_target_dependencies(test_coupe2026
     rclcpp geometry_msgs std_msgs krabi_msgs visualization_msgs
-    tf2_eigen tf2_ros tf2_geometry_msgs)
+    tf2_eigen tf2_ros tf2_geometry_msgs diagnostic_updater)
 
   # --- Integration tests for the mission-planning engine (StrategieV3 + Dijkstra + Etape) ---
   # Evergreen: drives a custom minimal graph, no competition data, no ROS node.
@@ -141,7 +143,7 @@ if(BUILD_TESTING)
   target_include_directories(test_mission_graph PRIVATE include)
   target_link_libraries(test_mission_graph krabilib_strat krabilib)
   ament_target_dependencies(test_mission_graph
-    rclcpp geometry_msgs tf2_eigen tf2_ros tf2_geometry_msgs)
+    rclcpp geometry_msgs tf2_eigen tf2_ros tf2_geometry_msgs diagnostic_updater)
 
   # --- Basic ROS 2 node tests: construction + pub/sub/service wiring + tirette->RUN ---
   # Compiles the full node implementation EXCEPT node_main.cpp (avoids a second main()).
@@ -164,7 +166,7 @@ if(BUILD_TESTING)
   target_link_libraries(test_goal_strat_node krabilib_strat krabilib)
   ament_target_dependencies(test_goal_strat_node
     rclcpp geometry_msgs std_msgs krabi_msgs visualization_msgs
-    tf2_eigen tf2_ros tf2_geometry_msgs)
+    tf2_eigen tf2_ros tf2_geometry_msgs diagnostic_updater)
 endif()
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)

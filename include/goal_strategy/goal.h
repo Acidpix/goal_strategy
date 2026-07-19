@@ -23,6 +23,8 @@
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
 
+#include <diagnostic_updater/diagnostic_updater.hpp>
+
 #ifdef YEAR_2025
 #include "coupe2025.h"
 #include "goal_strategy/grabi.h"
@@ -77,6 +79,7 @@ public:
     {
         return m_state;
     }
+    void produce_diagnostics(diagnostic_updater::DiagnosticStatusWrapper& stat);
 
 private:
     void init();
@@ -122,9 +125,8 @@ private:
     void updateVacuum(std_msgs::msg::Float32::SharedPtr vacuum_msg);
     void updateCaissesSides(krabi_msgs::msg::CaissesSides::SharedPtr a_caisses_sides_msg);
 #ifdef YEAR_2026
-    void grabFlipDropCallback(
-        const std::shared_ptr<krabi_msgs::srv::GrabFlipDrop::Request> request,
-        std::shared_ptr<krabi_msgs::srv::GrabFlipDrop::Response> response);
+    void grabFlipDropCallback(const std::shared_ptr<krabi_msgs::srv::GrabFlipDrop::Request> request,
+                              std::shared_ptr<krabi_msgs::srv::GrabFlipDrop::Response> response);
 #endif
     void updateAX12Info(krabi_msgs::msg::AX12Info::SharedPtr ax12_msg, uint8_t);
     void updateAX12Info1(krabi_msgs::msg::AX12Info::SharedPtr ax12_msg)
@@ -255,4 +257,10 @@ private:
     bool m_rightmost_caisse_is_our_side_up = false;
     bool m_funny_action_Y_hysteresis = false;
     bool m_funny_action_X_hysteresis = false;
+
+    bool m_transform_found = false;
+    bool m_thermometer_orient_timeout = false;
+    bool m_thermometer_move_timeout = false;
+    bool m_garde_manger_orient_timeout = false;
+    bool m_caisse_orient_timeout = false;
 };

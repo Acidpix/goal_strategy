@@ -16,6 +16,11 @@ int main(int argc, char* argv[])
     auto node = std::make_shared<GoalStrat>();
     node->initTF();
 
+    // Register diagnostics so the robot status screen can show GoalStrat's health
+    diagnostic_updater::Updater updater(node);
+    updater.setHardwareID("GoalStrat");
+    updater.add("GoalStrat", node.get(), &GoalStrat::produce_diagnostics);
+
     rclcpp::executors::MultiThreadedExecutor executor;
     executor.add_node(node);
     executor.spin();

@@ -81,8 +81,8 @@ TEST_F(GoalStratNodeTest, ConstructsWithoutError)
 
 TEST_F(GoalStratNodeTest, StartsInInitState)
 {
-    // No tick has run yet (we don't spin here), so the node is still in INIT.
-    EXPECT_EQ(node_->getState(), GoalStrat::State::INIT);
+    // No tick has run yet (we don't spin here), so the node is still in WAIT_TIRETTE_IN.
+    EXPECT_EQ(node_->getState(), GoalStrat::State::WAIT_TIRETTE_IN);
 }
 
 // ---------------------------------------------------------------------------
@@ -185,13 +185,37 @@ TEST_F(GoalStratNodeTest, AdvertisesGrabFlipDropService)
 TEST_F(GoalStratNodeTest, TiretteTransitionsToRun)
 {
     // Advance out of INIT into WAIT_TIRETTE (a couple of 100 ms timer ticks).
-    spin_until([]() { return node_->getState() == GoalStrat::State::WAIT_TIRETTE; }, 1000);
-    ASSERT_EQ(node_->getState(), GoalStrat::State::WAIT_TIRETTE);
+    spin_until([]() { return node_->getState() == GoalStrat::State::WAIT_TIRETTE_IN; }, 1000);
+    ASSERT_EQ(node_->getState(), GoalStrat::State::WAIT_TIRETTE_IN);
 
     // m_remainig_time defaults to 85 s (> 1 s) in the constructor, so publishing
     // tirette=true is enough to satisfy the WAIT_TIRETTE -> RUN guard.
     auto tirette_pub = node_->create_publisher<std_msgs::msg::Bool>("tirette", 5);
     std_msgs::msg::Bool msg;
+    msg.data = false;
+
+    bool reached_init = spin_until(
+      [&]()
+      {
+          tirette_pub->publish(msg);
+          return node_->getState() == GoalStrat::State::INIT;
+      },
+      3000);
+
+    EXPECT_TRUE(reached_init);
+    EXPECT_EQ(node_->getState(), GoalStrat::State::INIT);
+
+    bool reached_wait_tirette = spin_until(
+      [&]()
+      {
+          tirette_pub->publish(msg);
+          return node_->getState() == GoalStrat::State::WAIT_TIRETTE;
+      },
+      10000);
+
+    EXPECT_TRUE(reached_wait_tirette);
+    EXPECT_EQ(node_->getState(), GoalStrat::State::WAIT_TIRETTE);
+
     msg.data = true;
 
     bool reached_run = spin_until(

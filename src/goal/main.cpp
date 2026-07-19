@@ -384,11 +384,12 @@ void GoalStrat::updateCurrentPose()
         const auto& transform
           = m_tf_buffer_->lookupTransform("map", base_link_id, tf2::TimePointZero).transform;
         m_current_pose = Pose(transform);
+        m_transform_found = true;
     }
     catch (tf2::TransformException& ex)
     {
         RCLCPP_WARN(this->get_logger(), "%s", ex.what());
-        // @todo diagnostic
+        m_transform_found = false;
     }
 
     RCLCPP_DEBUG_STREAM(this->get_logger(), "updateCurrentPose: " << m_current_pose << std::endl);
@@ -502,8 +503,8 @@ GoalStrat::GoalStrat()
     m_strat_mvnt.max_speed.angular.z = goal_MAX_ALLOWED_ANGULAR_SPEED;
     m_strat_mvnt.reverse_gear = krabi_msgs::msg::StratMovement::FORWARD_OR_REVERSE; // don't care
 
-    m_state = State::INIT;
-    m_tirette = false;
+    m_state = State::WAIT_TIRETTE_IN;
+    m_tirette = true;
     m_vacuum_level = 0.f;
     m_vacuum_state = OPEN_AIR;
 
@@ -1246,11 +1247,12 @@ void GoalStrat::stateRun()
                 stopLinear();
                 startAngular();
                 successAlign = alignWithAngleWithTimeout(Angle(0));
+                m_thermometer_orient_timeout = false;
                 if (!successAlign)
                 {
                     RCLCPP_WARN_STREAM(this->get_logger(),
                                        "Timeout while orienting toward thermometre");
-                    // @todo add diagnostic?
+                    m_thermometer_orient_timeout = true;
                 }
                 m_strat_graph->grabThermometre();
 
@@ -1267,10 +1269,11 @@ void GoalStrat::stateRun()
                                         rclcpp::Duration(3 * m_timeout_orient, 0),
                                         Distance(10000),
                                         true);
+                m_thermometer_move_timeout = false;
                 if (!successGoTo)
                 {
                     RCLCPP_WARN_STREAM(this->get_logger(), "Timeout while moving the thermometre");
-                    // @todo add diagnostic?
+                    m_thermometer_move_timeout = true;
                 }
 
                 m_strat_graph->dropThermometre();
@@ -1294,11 +1297,12 @@ void GoalStrat::stateRun()
 
                 successAlign = alignWithAngleWithTimeout(l_garde_manger->getGoalPose().getAngle()
                                                          + Angle(M_PI / 2));
+                m_garde_manger_orient_timeout = false;
                 if (!successAlign)
                 {
                     RCLCPP_WARN_STREAM(this->get_logger(),
                                        "Timeout while orienting toward garde manger");
-                    // @todo add diagnostic?
+                    m_garde_manger_orient_timeout = true;
                 }
                 else
                 {
@@ -1327,10 +1331,11 @@ void GoalStrat::stateRun()
 
                 successAlign = alignWithAngleWithTimeout(
                   l_zone_de_ramassage->getGoalPose().getAngle() + Angle(M_PI / 2));
+                m_caisse_orient_timeout = false;
                 if (!successAlign)
                 {
                     RCLCPP_WARN_STREAM(this->get_logger(), "Timeout while orienting toward caisse");
-                    // @todo add diagnostic?
+                    m_caisse_orient_timeout = true;
                 }
                 else
                 {
@@ -1462,18 +1467,21 @@ void GoalStrat::init()
         {
             RCLCPP_WARN_STREAM(this->get_logger(), "Unkown starting position" << std::endl);
         }
-        m_strat_graph = std::make_unique<Coupe2025>(
-          !m_is_blue, m_starting_position_2025, rclcpp::Node::SharedPtr(this, [](rclcpp::Node*) {}));
+        m_strat_graph
+          = std::make_unique<Coupe2025>(!m_is_blue,
+                                        m_starting_position_2025,
+                                        rclcpp::Node::SharedPtr(this, [](rclcpp::Node*) {}));
     }
 #elif defined(YEAR_2026)
-    m_strat_graph = std::make_unique<Coupe2026>(!m_is_blue, rclcpp::Node::SharedPtr(this, [](rclcpp::Node*) {}));
+    m_strat_graph = std::make_unique<Coupe2026>(
+      !m_is_blue, rclcpp::Node::SharedPtr(this, [](rclcpp::Node*) {}));
 #endif
 
     m_strat_graph->update();
     m_previous_etape_type = Etape::EtapeType::POINT_PASSAGE;
     // m_strat_graph->getEtapeEnCours()->getEtapeType(); // Was shitting when the first action was
     // one unidirectionnal
-    m_state = State::INIT;
+    m_state = State::WAIT_TIRETTE_IN;
 
     m_running = std::thread(&GoalStrat::publishAll, this);
 }
@@ -1487,26 +1495,35 @@ void GoalStrat::loop()
 {
     switch (m_state)
     {
+    case State::WAIT_TIRETTE_IN:
+        RCLCPP_INFO_STREAM(this->get_logger(), "Waiting for tirette to be in" << std::endl);
+        if (!m_tirette)
+        {
+            RCLCPP_INFO_STREAM(this->get_logger(), "Tirette is in!" << std::endl);
+
+            m_state = State::INIT;
+        }
+        break;
     case State::INIT:
+        RCLCPP_INFO_STREAM(this->get_logger(), "Start init " << std::endl);
+
 // init(); //init before
 #ifdef YEAR_2025
         m_grabi->initializeElevator();
 #elif defined(YEAR_2026)
         m_billig->initBillig(true);
 #endif
-        m_state = State::WAIT_TIRETTE_IN;
-        break;
+        RCLCPP_INFO_STREAM(this->get_logger(), "Init done" << std::endl);
 
-    case State::WAIT_TIRETTE_IN:
-        if (!m_tirette)
-        {
-            m_state = State::WAIT_TIRETTE;
-        }
+        m_state = State::WAIT_TIRETTE;
         break;
     case State::WAIT_TIRETTE:
+        RCLCPP_INFO_STREAM(this->get_logger(), "Waiting for tirette to be out" << std::endl);
 
         if (m_state == State::WAIT_TIRETTE && m_tirette && m_remainig_time > rclcpp::Duration(1, 0))
         {
+            RCLCPP_INFO_STREAM(this->get_logger(), "Go for Run!" << std::endl);
+
             m_state = State::RUN;
             if (m_year == 2025)
             {
@@ -1551,4 +1568,63 @@ void GoalStrat::stop()
     m_strat_mvnt.max_speed.angular.z = 0;
     m_strat_mvnt.max_speed.linear.x = 0;
     publishStratMovement();
+}
+
+void GoalStrat::produce_diagnostics(diagnostic_updater::DiagnosticStatusWrapper& stat)
+{
+    bool l_message_sent = false;
+    // stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK, "MainStrat started");
+    if (m_state == State::WAIT_TIRETTE_IN)
+    {
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK, "Waiting for tirette to be in");
+        l_message_sent = true;
+    }
+    else if (m_state == State::WAIT_TIRETTE)
+    {
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK, "Waiting for tirette to be out");
+        l_message_sent = true;
+    }
+
+    if (!m_transform_found)
+    {
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR,
+                     "Unable to find a transform from map to odom");
+        l_message_sent = true;
+    }
+    else if (m_thermometer_orient_timeout)
+    {
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN,
+                     "Timeout while orienting towards the thermometre");
+        l_message_sent = true;
+    }
+    else if (m_thermometer_move_timeout)
+    {
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN,
+                     "Timeout while moving the thermometre");
+        l_message_sent = true;
+    }
+    else if (m_garde_manger_orient_timeout)
+    {
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN,
+                     "Timeout while orienting towards the garde manger");
+        l_message_sent = true;
+    }
+    else if (m_caisse_orient_timeout)
+    {
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN,
+                     "Timeout while orienting towards the caisse");
+        l_message_sent = true;
+    }
+    else if (m_state == State::ALL_DONE)
+    {
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK, "All done");
+    }
+    else if (m_state == State::EXIT)
+    {
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK, "Exiting");
+    }
+    else if (!l_message_sent && m_state == State::RUN)
+    {
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK, "Goalstrat running");
+    }
 }
