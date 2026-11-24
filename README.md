@@ -124,7 +124,7 @@ Time remaining until the robot has to stop. Note: it is not the actual end of th
 # What to do for a new year
 A lot!
 
-- Define the new actions (ex: krabilib/stragie/gardeManger.cpp)
+- Define the new actions (ex: krabilib/strategie/gardeManger.cpp)
 - Define a new coupe202X.cpp file, with:
   - How to visualize the actions (debugEtapes)
   - A new graph, in the constructor:
