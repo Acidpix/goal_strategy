@@ -236,7 +236,7 @@ bool GoalStrat::requestPreMatchAction(PreMatchRequest a_request,
 
     const State l_state = m_state;
 
-    if (m_tirette_filter.started()
+    if (m_tirette_filter.started() || m_chrono_running
         || (l_state != State::WAIT_TIRETTE_IN && l_state != State::INIT
             && l_state != State::WAIT_TIRETTE))
     {
@@ -285,7 +285,7 @@ bool GoalStrat::handlePreMatchRequest()
         return false;
     }
 
-    if (m_tirette_filter.started())
+    if (m_tirette_filter.started() || m_chrono_running)
     {
         // Le match a démarré entre-temps : ne surtout pas écraser la pose du robot
         m_pre_match_request = PRE_MATCH_NONE;
@@ -369,8 +369,10 @@ std::string GoalStrat::preMatchState() const
     {
         return "end";
     }
-    // Dès le retrait de la tirette, même si l'initialisation n'est pas finie
-    if (l_state == State::RUN || l_state == State::ALL_DONE || m_tirette_filter.started())
+    // Dès le retrait de la tirette, même si l'initialisation n'est pas finie. Et si goal_strat a
+    // redémarré en plein match (il attend alors la tirette, mais le chrono de Core tourne)
+    if (l_state == State::RUN || l_state == State::ALL_DONE || m_tirette_filter.started()
+        || m_chrono_running)
     {
         return "match";
     }
@@ -407,6 +409,22 @@ void GoalStrat::publishPreMatchState()
     m_pre_match_state_sent = l_state;
     std_msgs::msg::String l_msg;
     l_msg.data = l_state;
+    m_pre_match_state_pub->publish(l_msg);
+}
+
+/**
+ * @brief Republie le dernier état (1 Hz, thread publishAll) : l'IHM sait ainsi que le robot est
+ * vivant, même si loop() est bloquée par une action.
+ */
+void GoalStrat::repeatPreMatchState()
+{
+    std::lock_guard<std::mutex> l_lock(m_pre_match_state_mutex);
+    if (m_pre_match_state_sent.empty())
+    {
+        return; // constructeur pas fini : l'éditeur n'existe pas encore
+    }
+    std_msgs::msg::String l_msg;
+    l_msg.data = m_pre_match_state_sent;
     m_pre_match_state_pub->publish(l_msg);
 }
 

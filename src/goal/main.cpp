@@ -704,9 +704,13 @@ void GoalStrat::publishAll()
     std::string s = "mainPubAll";
 
     pthread_setname_np(pthread_self(), s.c_str());
-    while (!m_stop_publishing)
+    for (unsigned int i = 0; !m_stop_publishing; i++)
     {
         usleep(50000);
+        if (i % 20 == 0)
+        {
+            repeatPreMatchState();
+        }
         updateCurrentPose();
         checkFunnyAction();
         checkStopMatch();
@@ -826,6 +830,13 @@ void GoalStrat::updateRemainingTime(
   builtin_interfaces::msg::Duration::SharedPtr a_remaining_time_match)
 {
     m_remainig_time = rclcpp::Duration(*a_remaining_time_match);
+    // Avant le match, Core publie une valeur fixe ; elle ne diminue qu'en match
+    const double l_remaining_s = m_remainig_time.seconds();
+    if (m_last_remaining_s >= 0. && l_remaining_s < m_last_remaining_s)
+    {
+        m_chrono_running = true;
+    }
+    m_last_remaining_s = l_remaining_s;
     m_strat_graph->setRemainingTime(m_remainig_time.seconds() * 1000);
     checkFunnyAction();
     checkStopMatch();

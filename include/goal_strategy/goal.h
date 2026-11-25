@@ -153,6 +153,7 @@ private:
     bool preMatchFail(const std::string& a_reason);
     std::string preMatchState() const;
     void publishPreMatchState();
+    void repeatPreMatchState();
     void publishRecalageZones();
     bool setPreMatchMotion(bool a_enable);
     bool goToStartPose();
@@ -336,6 +337,10 @@ private:
     std::string m_pre_match_zone; // écrit avant m_pre_match_request, lu après
     recalage::Config m_recalage_config;
     std::atomic<bool> m_pre_match_busy{ false };
+    // Le chrono de Core a diminué : un match est en cours, même si goal_strat vient de redémarrer
+    // (respawn) et attend la tirette
+    std::atomic<bool> m_chrono_running{ false };
+    double m_last_remaining_s = -1.; // callback remaining_time seulement
     // Utilisés seulement par le thread de loop()
     std::string m_pre_match_step;         // étape en cours
     std::string m_pre_match_error;        // première erreur de l'action en cours

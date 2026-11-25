@@ -20,6 +20,7 @@
  * Run with:  colcon test --packages-select goal_strategy
  */
 
+#include <algorithm>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -32,6 +33,15 @@
 #include <std_msgs/msg/string.hpp>
 
 #include "goal_strategy/goal.h"
+
+// The state is also repeated at 1 Hz (heartbeat for the IHM)
+static void push_if_new(std::vector<std::string>& states, const std::string& state)
+{
+    if (states.empty() || states.back() != state)
+    {
+        states.push_back(state);
+    }
+}
 
 class GoalStratNodeTest : public ::testing::Test
 {
@@ -207,7 +217,7 @@ TEST_F(GoalStratNodeTest, RecalageWithoutTiretteReportsItsFailure)
     auto sub = node_->create_subscription<std_msgs::msg::String>(
       "pre_match_state",
       rclcpp::QoS(10).transient_local(),
-      [&](const std_msgs::msg::String::SharedPtr msg) { states.push_back(msg->data); });
+      [&](const std_msgs::msg::String::SharedPtr msg) { push_if_new(states, msg->data); });
     ASSERT_TRUE(spin_until([&]() { return !states.empty(); }));
     EXPECT_EQ(states.back(), "wait_tirette_in");
 
@@ -241,7 +251,7 @@ TEST_F(GoalStratNodeTest, TiretteTransitionsToRun)
     auto state_sub = node_->create_subscription<std_msgs::msg::String>(
       "pre_match_state",
       rclcpp::QoS(10),
-      [&](const std_msgs::msg::String::SharedPtr l_msg) { states.push_back(l_msg->data); });
+      [&](const std_msgs::msg::String::SharedPtr l_msg) { push_if_new(states, l_msg->data); });
     std_msgs::msg::Bool msg;
     msg.data = false;
 
@@ -268,10 +278,9 @@ TEST_F(GoalStratNodeTest, TiretteTransitionsToRun)
     EXPECT_EQ(node_->getState(), GoalStrat::State::WAIT_TIRETTE);
 
     // The failed recalage (previous test) is still shown after init: the robot is not ready
-    spin_until([&]() { return states.size() >= 2; }, 1000);
-    ASSERT_GE(states.size(), 2u);
-    EXPECT_EQ(states[0], "init");
-    EXPECT_EQ(states[1].rfind("recalage_failed: ", 0), 0u) << states[1];
+    EXPECT_TRUE(spin_until(
+      [&]() { return !states.empty() && states.back().rfind("recalage_failed: ", 0) == 0; }, 1000));
+    EXPECT_NE(std::find(states.begin(), states.end(), "init"), states.end());
 
     msg.data = true;
 
