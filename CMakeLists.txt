@@ -122,6 +122,11 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_geometry
     rclcpp geometry_msgs tf2_eigen tf2_ros tf2_geometry_msgs diagnostic_updater)
 
+  ament_add_gtest(test_tirette_filter
+    test/test_tirette_filter.cpp
+  )
+  target_include_directories(test_tirette_filter PRIVATE include)
+
   # --- Tier 2: seasonal characterization of THIS YEAR's graph ---
   # The test body is guarded by YEAR_2026 (from goal.h): when the year flips it
   # compiles to an empty main and is replaced by test_coupe2027.cpp.
