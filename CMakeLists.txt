@@ -184,6 +184,8 @@ if(BUILD_TESTING)
     src/goal/recalage_sequence.cpp
   )
   target_include_directories(test_goal_strat_node PRIVATE include)
+  target_compile_definitions(test_goal_strat_node PRIVATE
+    RECALAGE_YAML="${CMAKE_CURRENT_SOURCE_DIR}/config/recalage_2026.yaml")
   target_link_libraries(test_goal_strat_node krabilib_strat krabilib yaml-cpp::yaml-cpp)
   ament_target_dependencies(test_goal_strat_node
     rclcpp geometry_msgs std_msgs krabi_msgs visualization_msgs

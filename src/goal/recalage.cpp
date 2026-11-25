@@ -139,7 +139,35 @@ void GoalStrat::declareRecalageParameters()
 
     loadRecalageZones();
 
+    // Conservés pour les abonnés tardifs (IHM relancée...)
+    const auto l_latched = rclcpp::QoS(1).transient_local();
+    m_pre_match_state_pub
+      = this->create_publisher<std_msgs::msg::String>("pre_match_state", l_latched);
+    m_recalage_zones_pub
+      = this->create_publisher<krabi_msgs::msg::RecalageZones>("recalage_zones", l_latched);
+    publishRecalageZones();
+    publishPreMatchState();
+
     // Les services ne font que déposer une demande : l'action s'exécute dans loop()
+    m_start_recalage_zone_srv = this->create_service<krabi_msgs::srv::StartRecalage>(
+      "start_recalage_zone",
+      [this](const std::shared_ptr<krabi_msgs::srv::StartRecalage::Request> req,
+             std::shared_ptr<krabi_msgs::srv::StartRecalage::Response> res)
+      { res->success = requestPreMatchAction(PRE_MATCH_RECALAGE, req->zone, res->message); },
+      rclcpp::ServicesQoS(),
+      m_recalage_cb_group);
+    m_recalage_sub = this->create_subscription<std_msgs::msg::Bool>(
+      "recalage",
+      5,
+      [this](const std_msgs::msg::Bool::SharedPtr msg)
+      {
+          std::string l_message; // déjà dans les logs
+          if (msg->data)
+          {
+              requestPreMatchAction(PRE_MATCH_RECALAGE, "", l_message);
+          }
+      },
+      l_options);
     m_start_recalage_srv = this->create_service<std_srvs::srv::Trigger>(
       "start_recalage",
       [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
@@ -195,8 +223,8 @@ void GoalStrat::loadRecalageZones()
 }
 
 /**
- * @brief Dépose une demande d'action avant match. Acceptée seulement avant le match (état
- * WAIT_TIRETTE) et si aucune autre action n'est en cours.
+ * @brief Dépose une demande d'action avant match. Acceptée avec ou sans tirette, mais refusée
+ * pendant l'initialisation (pinces en mouvement), en match, ou si une action est en cours.
  * @param a_zone zone de recalage ; vide = zone par défaut
  */
 bool GoalStrat::requestPreMatchAction(PreMatchRequest a_request,
@@ -206,9 +234,17 @@ bool GoalStrat::requestPreMatchAction(PreMatchRequest a_request,
     const std::string l_zone = a_zone.empty() ? m_recalage_config.default_zone : a_zone;
     bool l_accepted = false;
 
-    if (m_state != State::WAIT_TIRETTE)
+    const State l_state = m_state;
+
+    if (m_tirette_filter.started()
+        || (l_state != State::WAIT_TIRETTE_IN && l_state != State::INIT
+            && l_state != State::WAIT_TIRETTE))
     {
-        a_message = "refusé : uniquement avant le match (état WAIT_TIRETTE)";
+        a_message = "refusé : uniquement avant le match";
+    }
+    else if (l_state == State::INIT)
+    {
+        a_message = "refusé : initialisation en cours";
     }
     else if (m_pre_match_busy || m_pre_match_request != PRE_MATCH_NONE)
     {
@@ -217,6 +253,10 @@ bool GoalStrat::requestPreMatchAction(PreMatchRequest a_request,
     else if (a_request == PRE_MATCH_RECALAGE && m_recalage.use_lidar_loc)
     {
         a_message = "refusé : recalage désactivé avec use_lidar_loc (AMCL publie map->odom)";
+    }
+    else if (a_request == PRE_MATCH_RECALAGE && l_zone.empty())
+    {
+        a_message = "refusé : aucune zone par défaut utilisable (voir les logs)";
     }
     else if (a_request == PRE_MATCH_RECALAGE && m_recalage_config.find(l_zone) == nullptr)
     {
@@ -227,7 +267,7 @@ bool GoalStrat::requestPreMatchAction(PreMatchRequest a_request,
         m_pre_match_zone = l_zone;
         m_pre_match_request = a_request;
         l_accepted = true;
-        a_message = "accepté, voir les logs de goal_strat pour le résultat";
+        a_message = "accepté, résultat sur pre_match_state";
     }
     RCLCPP_INFO(this->get_logger(), "%s", a_message.c_str());
     return l_accepted;
@@ -245,7 +285,17 @@ bool GoalStrat::handlePreMatchRequest()
         return false;
     }
 
+    if (m_tirette_filter.started())
+    {
+        // Le match a démarré entre-temps : ne surtout pas écraser la pose du robot
+        m_pre_match_request = PRE_MATCH_NONE;
+        return false;
+    }
+
     m_pre_match_busy = true;
+    m_pre_match_error.clear();
+    m_pre_match_step = l_request == PRE_MATCH_RECALAGE ? "préparation" : "retour au départ";
+    publishPreMatchState();
     const recalage::Zone* l_zone = m_recalage_config.find(m_pre_match_zone);
     m_pre_match_request = PRE_MATCH_NONE;
 
@@ -270,8 +320,112 @@ bool GoalStrat::handlePreMatchRequest()
                 l_request == PRE_MATCH_RECALAGE ? "recalage" : "go_to_start",
                 l_ok ? "réussie" : "ÉCHEC");
 
+    if (!m_tirette_filter.started())
+    {
+        const std::string l_error = l_ok                        ? ""
+                                    : m_pre_match_error.empty() ? "cause inconnue"
+                                                                : m_pre_match_error;
+        // Un recalage réussi efface tous les échecs ; go_to_start seulement les siens (il ne
+        // corrige pas la pose)
+        m_go_to_start_failure = l_request == PRE_MATCH_GO_TO_START ? l_error : "";
+        if (l_request == PRE_MATCH_RECALAGE)
+        {
+            m_recalage_failure = l_error;
+            m_recalage_done = l_ok ? l_zone->label : "";
+        }
+    }
     m_pre_match_busy = false;
+    publishPreMatchState();
     return true;
+}
+
+/**
+ * @brief Note la cause d'échec de l'action en cours (la première : c'est la vraie cause).
+ * @return false, pour écrire : return preMatchFail("...");
+ */
+bool GoalStrat::preMatchFail(const std::string& a_reason)
+{
+    if (m_tirette_filter.started())
+    {
+        RCLCPP_INFO(this->get_logger(), "Action interrompue : le match démarre");
+        return false;
+    }
+    RCLCPP_ERROR(this->get_logger(), "Recalage: %s", a_reason.c_str());
+    if (m_pre_match_error.empty())
+    {
+        m_pre_match_error = a_reason;
+    }
+    return false;
+}
+
+/**
+ * @brief État affiché par l'IHM : "état" ou "état: détail".
+ * wait_tirette_in | init | ready | recalage | recalage_failed | match | end
+ */
+std::string GoalStrat::preMatchState() const
+{
+    const State l_state = m_state;
+    if (l_state == State::EXIT)
+    {
+        return "end";
+    }
+    // Dès le retrait de la tirette, même si l'initialisation n'est pas finie
+    if (l_state == State::RUN || l_state == State::ALL_DONE || m_tirette_filter.started())
+    {
+        return "match";
+    }
+    if (l_state == State::INIT)
+    {
+        return "init";
+    }
+    if (m_pre_match_busy)
+    {
+        return "recalage: " + m_pre_match_step;
+    }
+    if (!m_recalage_failure.empty() || !m_go_to_start_failure.empty())
+    {
+        return "recalage_failed: "
+               + (m_recalage_failure.empty() ? m_go_to_start_failure : m_recalage_failure);
+    }
+    const std::string l_text = l_state == State::WAIT_TIRETTE_IN ? "wait_tirette_in" : "ready";
+    return m_recalage_done.empty() ? l_text : l_text + ": recalé (" + m_recalage_done + ")";
+}
+
+/**
+ * @brief Publie l'état s'il a changé. Appelé depuis loop() (et les actions, qui la bloquent), et
+ * au départ du match depuis updateTirette() : preMatchState() ne lit alors aucune des chaînes
+ * réservées au thread de loop().
+ */
+void GoalStrat::publishPreMatchState()
+{
+    std::lock_guard<std::mutex> l_lock(m_pre_match_state_mutex);
+    const std::string l_state = preMatchState();
+    if (l_state == m_pre_match_state_sent)
+    {
+        return;
+    }
+    m_pre_match_state_sent = l_state;
+    std_msgs::msg::String l_msg;
+    l_msg.data = l_state;
+    m_pre_match_state_pub->publish(l_msg);
+}
+
+void GoalStrat::publishRecalageZones()
+{
+    krabi_msgs::msg::RecalageZones l_msg;
+    l_msg.default_zone = m_recalage_config.default_zone;
+    l_msg.errors = m_recalage_config.errors;
+    for (const auto& l_zone : m_recalage_config.zones)
+    {
+        krabi_msgs::msg::RecalageZone l_zone_msg;
+        l_zone_msg.name = l_zone.name;
+        l_zone_msg.label = l_zone.label;
+        l_zone_msg.x = l_zone.pose.x;
+        l_zone_msg.y = l_zone.pose.y;
+        l_zone_msg.theta = l_zone.pose.theta;
+        l_msg.zones.push_back(l_zone_msg);
+    }
+    m_recalage_zones_pub->publish(l_msg);
 }
 
 /**
@@ -282,8 +436,7 @@ bool GoalStrat::setPreMatchMotion(bool a_enable)
     const auto l_timeout = std::chrono::duration<double>(m_recalage.service_timeout);
     if (!m_pre_match_motion_client->wait_for_service(l_timeout))
     {
-        RCLCPP_ERROR(this->get_logger(), "Service enable_pre_match_motion indisponible");
-        return false;
+        return preMatchFail("main_strat ne répond pas (enable_pre_match_motion)");
     }
     auto l_req = std::make_shared<std_srvs::srv::SetBool::Request>();
     l_req->data = a_enable;
@@ -291,8 +444,7 @@ bool GoalStrat::setPreMatchMotion(bool a_enable)
     if (l_future.wait_for(l_timeout) != std::future_status::ready)
     {
         m_pre_match_motion_client->remove_pending_request(l_future);
-        RCLCPP_ERROR(this->get_logger(), "Pas de réponse de enable_pre_match_motion");
-        return false;
+        return preMatchFail("main_strat ne répond pas (enable_pre_match_motion)");
     }
     return l_future.get()->success;
 }
@@ -371,8 +523,9 @@ bool GoalStrat::goToPosition(double a_x, double a_y)
             return true;
         }
     }
-    RCLCPP_WARN(this->get_logger(), "Position (%.3f, %.3f) non atteinte", a_x, a_y);
-    return false;
+    char l_reason[96];
+    snprintf(l_reason, sizeof(l_reason), "position (%.2f, %.2f) non atteinte (obstacle ?)", a_x, a_y);
+    return preMatchFail(l_reason);
 }
 
 /**
@@ -433,7 +586,7 @@ bool GoalStrat::alignInPlace(Angle a_angle, rclcpp::Duration a_timeout)
     RCLCPP_WARN_STREAM(this->get_logger(),
                        "alignInPlace: non aligné, cap " << m_current_pose.getAngle() << " au lieu de "
                                                      << a_angle);
-    return false;
+    return preMatchFail("rotation impossible (robot bloqué ?)");
 }
 
 /**
@@ -477,8 +630,7 @@ bool GoalStrat::waitForWallContact(rclcpp::Duration a_timeout)
 
         if (!getOdomStamp(l_odom_stamp) || (this->now() - l_odom_stamp).seconds() > 0.5)
         {
-            RCLCPP_ERROR(this->get_logger(), "Recalage: odométrie perdue, abandon");
-            return false;
+            return preMatchFail("odométrie perdue");
         }
 
         l_has_moved = l_has_moved
@@ -504,11 +656,9 @@ bool GoalStrat::waitForWallContact(rclcpp::Duration a_timeout)
             return true;
         }
     }
-    RCLCPP_WARN(this->get_logger(),
-                l_has_moved ? "Recalage: timeout, pas de contact détecté"
-                            : "Recalage: le robot n'a pas bougé en poussant (déjà contre le mur ? "
-                              "roues bloquées ? PWM trop faible ?)");
-    return false;
+    return preMatchFail(l_has_moved ? "pas de contact avec le mur"
+                                    : "le robot n'a pas bougé en poussant (déjà contre le mur ? "
+                                      "roues bloquées ? PWM trop faible ?)");
 }
 
 /**
@@ -519,8 +669,7 @@ bool GoalStrat::callCorrectPose(krabi_msgs::srv::CorrectPose::Request::SharedPtr
     if (!m_correct_pose_client->wait_for_service(std::chrono::duration<double>(
           m_recalage.service_timeout)))
     {
-        RCLCPP_ERROR(this->get_logger(), "Recalage: service correct_pose indisponible");
-        return false;
+        return preMatchFail("service correct_pose indisponible");
     }
 
     auto l_future = m_correct_pose_client->async_send_request(a_request);
@@ -530,15 +679,13 @@ bool GoalStrat::callCorrectPose(krabi_msgs::srv::CorrectPose::Request::SharedPtr
         != std::future_status::ready)
     {
         m_correct_pose_client->remove_pending_request(l_future);
-        RCLCPP_ERROR(this->get_logger(), "Recalage: pas de réponse de correct_pose");
-        return false;
+        return preMatchFail("pas de réponse de correct_pose");
     }
 
     auto l_res = l_future.get();
     if (!l_res->success)
     {
-        RCLCPP_ERROR(this->get_logger(), "Recalage: correct_pose a échoué: %s", l_res->message.c_str());
-        return false;
+        return preMatchFail("correct_pose a échoué : " + l_res->message);
     }
     return true;
 }
@@ -615,11 +762,13 @@ bool GoalStrat::recalageBordure(Wall a_wall, double a_clearance, bool a_reverse)
         if (l_coord_error > m_recalage.max_correction_dist
             || l_angle_error > m_recalage.max_correction_angle)
         {
-            RCLCPP_ERROR(this->get_logger(),
-                         "Recalage: correction refusée, trop grande (%.3f m, %.3f rad)",
-                         l_coord_error,
-                         l_angle_error);
-            return false;
+            char l_reason[96];
+            snprintf(l_reason,
+                     sizeof(l_reason),
+                     "correction refusée, trop grande (%.0f mm, %.0f deg)",
+                     l_coord_error * 1000.,
+                     l_angle_error * 180. / M_PI);
+            return preMatchFail(l_reason);
         }
 
         // 5. Correction de map -> odom
@@ -670,16 +819,10 @@ bool GoalStrat::recalageBordure(Wall a_wall, double a_clearance, bool a_reverse)
     m_goal_pose = m_current_pose;
     publishStratMovement();
 
-    if (m_tirette_filter.started())
-    {
-        RCLCPP_INFO(this->get_logger(), "Recalage interrompu : le match démarre");
-        return false;
-    }
-    if (!l_clear)
+    if (!l_clear || m_tirette_filter.started())
     {
         // La suite de la séquence suppose le robot écarté du mur (place pour pivoter)
-        RCLCPP_ERROR(this->get_logger(), "Recalage: dégagement impossible, arrêt");
-        return false;
+        return preMatchFail("dégagement du mur impossible (obstacle ?)");
     }
 
     RCLCPP_INFO_STREAM(this->get_logger(),
@@ -722,8 +865,12 @@ bool GoalStrat::runZone(const recalage::Zone& a_zone)
                     i + 1,
                     a_zone.steps.size(),
                     a_zone.steps[i].text.c_str());
+        m_pre_match_step = std::to_string(i + 1) + "/" + std::to_string(a_zone.steps.size()) + " "
+                           + a_zone.steps[i].text;
+        publishPreMatchState();
         if (!runStep(a_zone.steps[i]) || m_tirette_filter.started())
         {
+            m_pre_match_error = "étape " + m_pre_match_step + " : " + m_pre_match_error;
             RCLCPP_ERROR(this->get_logger(),
                          "Recalage zone '%s' : arrêt à l'étape %zu (%s)",
                          a_zone.name.c_str(),

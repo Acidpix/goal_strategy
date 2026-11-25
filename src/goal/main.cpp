@@ -773,7 +773,11 @@ void GoalStrat::updateDigitalReads([[maybe_unused]] std_msgs::msg::Byte::SharedP
  */
 void GoalStrat::updateTirette(std_msgs::msg::Bool::SharedPtr tirette)
 {
-    m_tirette_filter.update(tirette->data);
+    if (m_tirette_filter.update(tirette->data))
+    {
+        // Sans attendre loop(), bloquée plusieurs secondes si l'initialisation est en cours
+        publishPreMatchState();
+    }
 }
 
 /**
@@ -1494,9 +1498,16 @@ void GoalStrat::init()
  */
 void GoalStrat::loop()
 {
+    publishPreMatchState();
+
     switch (m_state)
     {
     case State::WAIT_TIRETTE_IN:
+        // Action avant match demandée (recalage / go_to_start), possible sans tirette : bloquant
+        if (handlePreMatchRequest())
+        {
+            break;
+        }
         RCLCPP_INFO_STREAM(this->get_logger(), "Waiting for tirette to be in" << std::endl);
         if (m_tirette_filter.armed())
         {
@@ -1519,7 +1530,7 @@ void GoalStrat::loop()
         m_state = State::WAIT_TIRETTE;
         break;
     case State::WAIT_TIRETTE:
-        // Action avant match demandée (start_recalage / go_to_start) : bloquant
+        // Action avant match demandée (recalage / go_to_start) : bloquant
         if (handlePreMatchRequest())
         {
             break;
