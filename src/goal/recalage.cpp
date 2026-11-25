@@ -17,6 +17,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <sstream>
 #include <unistd.h>
 
 using namespace std::chrono_literals;
@@ -102,7 +104,6 @@ void GoalStrat::declareRecalageParameters()
     m_recalage.timeout = this->declare_parameter("recalage.timeout", 5.0);
     m_recalage.align_timeout = this->declare_parameter("recalage.align_timeout", 5.0);
     m_recalage.service_timeout = this->declare_parameter("recalage.service_timeout", 1.0);
-    m_recalage.clearance = this->declare_parameter("recalage.clearance", 0.10);
     // Garde-fous : un robot qui ne démarre pas est immobile, sans être contre un mur
     m_recalage.min_push_dist = this->declare_parameter("recalage.min_push_dist", 0.02);
     m_recalage.max_correction_dist = this->declare_parameter("recalage.max_correction_dist", 0.15);
@@ -136,47 +137,100 @@ void GoalStrat::declareRecalageParameters()
     m_pre_match_motion_client = this->create_client<std_srvs::srv::SetBool>(
       "enable_pre_match_motion", rclcpp::ServicesQoS(), m_recalage_cb_group);
 
+    loadRecalageZones();
+
     // Les services ne font que déposer une demande : l'action s'exécute dans loop()
     m_start_recalage_srv = this->create_service<std_srvs::srv::Trigger>(
       "start_recalage",
       [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
              std::shared_ptr<std_srvs::srv::Trigger::Response> res)
-      { requestPreMatchAction(PRE_MATCH_RECALAGE, res); },
+      { res->success = requestPreMatchAction(PRE_MATCH_RECALAGE, "", res->message); },
       rclcpp::ServicesQoS(),
       m_recalage_cb_group);
     m_go_to_start_srv = this->create_service<std_srvs::srv::Trigger>(
       "go_to_start",
       [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
              std::shared_ptr<std_srvs::srv::Trigger::Response> res)
-      { requestPreMatchAction(PRE_MATCH_GO_TO_START, res); },
+      { res->success = requestPreMatchAction(PRE_MATCH_GO_TO_START, "", res->message); },
       rclcpp::ServicesQoS(),
       m_recalage_cb_group);
 }
 
 /**
- * @brief Callback commun de start_recalage / go_to_start. N'accepte la demande qu'avant le
- * match (état WAIT_TIRETTE) et si aucune autre action n'est en cours.
+ * @brief Lit les zones de recalage. Toute erreur est signalée, sans empêcher le reste de tourner.
  */
-void GoalStrat::requestPreMatchAction(PreMatchRequest a_request,
-                                      std::shared_ptr<std_srvs::srv::Trigger::Response> a_res)
+void GoalStrat::loadRecalageZones()
 {
+    const auto l_path = this->declare_parameter("recalage.file", std::string(""));
+    std::ifstream l_file(l_path);
+    if (!l_file.good())
+    {
+        RCLCPP_ERROR(this->get_logger(),
+                     "Recalage : fichier de zones '%s' introuvable, recalage indisponible",
+                     l_path.c_str());
+        return;
+    }
+    std::stringstream l_content;
+    l_content << l_file.rdbuf();
+
+    recalage::Pose2D l_start;
+    l_start.x = m_start_pose_x;
+    l_start.y = m_start_pose_y;
+    l_start.theta = m_start_pose_theta;
+    m_recalage_config = recalage::load(l_content.str(), m_is_blue, l_start);
+
+    for (const auto& l_error : m_recalage_config.errors)
+    {
+        RCLCPP_ERROR(this->get_logger(), "Recalage : %s", l_error.c_str());
+    }
+    for (const auto& l_zone : m_recalage_config.zones)
+    {
+        RCLCPP_INFO(this->get_logger(),
+                    "Recalage : zone '%s' (%s), %zu étapes%s",
+                    l_zone.name.c_str(),
+                    l_zone.label.c_str(),
+                    l_zone.steps.size(),
+                    l_zone.name == m_recalage_config.default_zone ? ", par défaut" : "");
+    }
+}
+
+/**
+ * @brief Dépose une demande d'action avant match. Acceptée seulement avant le match (état
+ * WAIT_TIRETTE) et si aucune autre action n'est en cours.
+ * @param a_zone zone de recalage ; vide = zone par défaut
+ */
+bool GoalStrat::requestPreMatchAction(PreMatchRequest a_request,
+                                      const std::string& a_zone,
+                                      std::string& a_message)
+{
+    const std::string l_zone = a_zone.empty() ? m_recalage_config.default_zone : a_zone;
+    bool l_accepted = false;
+
     if (m_state != State::WAIT_TIRETTE)
     {
-        a_res->success = false;
-        a_res->message = "refusé : uniquement avant le match (état WAIT_TIRETTE)";
+        a_message = "refusé : uniquement avant le match (état WAIT_TIRETTE)";
     }
     else if (m_pre_match_busy || m_pre_match_request != PRE_MATCH_NONE)
     {
-        a_res->success = false;
-        a_res->message = "refusé : une action avant match est déjà en cours";
+        a_message = "refusé : une action avant match est déjà en cours";
+    }
+    else if (a_request == PRE_MATCH_RECALAGE && m_recalage.use_lidar_loc)
+    {
+        a_message = "refusé : recalage désactivé avec use_lidar_loc (AMCL publie map->odom)";
+    }
+    else if (a_request == PRE_MATCH_RECALAGE && m_recalage_config.find(l_zone) == nullptr)
+    {
+        a_message = "refusé : zone '" + l_zone + "' inconnue ou désactivée (voir les logs)";
     }
     else
     {
+        m_pre_match_zone = l_zone;
         m_pre_match_request = a_request;
-        a_res->success = true;
-        a_res->message = "accepté, voir les logs de goal_strat pour le résultat";
+        l_accepted = true;
+        a_message = "accepté, voir les logs de goal_strat pour le résultat";
     }
-    RCLCPP_INFO(this->get_logger(), "%s", a_res->message.c_str());
+    RCLCPP_INFO(this->get_logger(), "%s", a_message.c_str());
+    return l_accepted;
 }
 
 /**
@@ -192,28 +246,29 @@ bool GoalStrat::handlePreMatchRequest()
     }
 
     m_pre_match_busy = true;
+    const recalage::Zone* l_zone = m_recalage_config.find(m_pre_match_zone);
     m_pre_match_request = PRE_MATCH_NONE;
 
-    if (setPreMatchMotion(true))
+    // Avant d'activer les moteurs : la bonne pose, puis une cible sur place. Sinon Core
+    // partirait vers son ancienne cible.
+    bool l_ok = l_request != PRE_MATCH_RECALAGE || (l_zone != nullptr && setZonePose(*l_zone));
+    if (l_ok)
     {
-        bool l_ok = false;
-        if (l_request == PRE_MATCH_RECALAGE)
-        {
-            l_ok = recalageInitial();
-        }
-        else if (l_request == PRE_MATCH_GO_TO_START)
-        {
-            l_ok = goToStartPose();
-        }
-        RCLCPP_INFO(this->get_logger(),
-                    "Action avant match %s : %s",
-                    l_request == PRE_MATCH_RECALAGE ? "recalage" : "go_to_start",
-                    l_ok ? "réussie" : "ÉCHEC");
+        stopPreMatchMotion();
+        l_ok = sleepUnlessMatch(0.2) && setPreMatchMotion(true);
+    }
+    if (l_ok)
+    {
+        l_ok = l_request == PRE_MATCH_RECALAGE ? runZone(*l_zone) : goToStartPose();
         // Quel que soit le résultat : ne rien laisser traîner pour le match (vitesse forcée,
         // sens de marche imposé par override_gear...)
         stopPreMatchMotion();
         setPreMatchMotion(false);
     }
+    RCLCPP_INFO(this->get_logger(),
+                "Action avant match %s : %s",
+                l_request == PRE_MATCH_RECALAGE ? "recalage" : "go_to_start",
+                l_ok ? "réussie" : "ÉCHEC");
 
     m_pre_match_busy = false;
     return true;
@@ -292,26 +347,20 @@ bool GoalStrat::getOdomStamp(rclcpp::Time& a_stamp)
 }
 
 /**
- * @brief Va à la pose de départ (start_pose.*), puis s'oriente.
+ * @brief Va en (a_x, a_y) en ligne droite, en avant ou en arrière.
  */
-bool GoalStrat::goToStartPose()
+bool GoalStrat::goToPosition(double a_x, double a_y)
 {
-    const Position l_target{ Distance(m_start_pose_x), Distance(m_start_pose_y) };
-    const Angle l_theta = Angle(m_start_pose_theta);
-    RCLCPP_INFO(this->get_logger(),
-                "go_to_start : (%.3f, %.3f, %.3f)",
-                m_start_pose_x,
-                m_start_pose_y,
-                m_start_pose_theta);
-
+    const Position l_target{ Distance(a_x), Distance(a_y) };
+    updateCurrentPose();
     m_goal_pose.setPosition(l_target);
-    m_goal_pose.setAngle(l_theta);
+    m_goal_pose.setAngle(m_current_pose.getAngle());
     override_gear = krabi_msgs::msg::StratMovement::FORWARD_OR_REVERSE;
     startAngular(); // orient = GO_TO_GOALPOSE_POSITION
     m_strat_mvnt.max_speed_at_arrival = 0.f;
 
-    bool l_arrived = false;
-    const auto l_deadline = this->now() + rclcpp::Duration(10, 0);
+    const double l_distance = (m_current_pose.getPosition() - l_target).getNorme();
+    const auto l_deadline = this->now() + rclcpp::Duration::from_seconds(10. + 10. * l_distance);
     while (this->now() < l_deadline && !m_tirette_filter.started())
     {
         publishStratMovement();
@@ -319,27 +368,32 @@ bool GoalStrat::goToStartPose()
         updateCurrentPose();
         if ((m_current_pose.getPosition() - l_target).getNorme() < REACH_DIST)
         {
-            l_arrived = true;
-            break;
+            return true;
         }
     }
-    if (!l_arrived)
+    RCLCPP_WARN(this->get_logger(), "Position (%.3f, %.3f) non atteinte", a_x, a_y);
+    return false;
+}
+
+/**
+ * @brief Va à la pose de départ (start_pose.*), puis s'oriente.
+ */
+bool GoalStrat::goToStartPose()
+{
+    RCLCPP_INFO(this->get_logger(),
+                "Retour au départ : (%.3f, %.3f, %.3f)",
+                m_start_pose_x,
+                m_start_pose_y,
+                m_start_pose_theta);
+    if (!goToPosition(m_start_pose_x, m_start_pose_y)
+        || !alignInPlace(Angle(m_start_pose_theta),
+                         rclcpp::Duration::from_seconds(m_recalage.align_timeout)))
     {
-        RCLCPP_WARN(this->get_logger(), "go_to_start : position non atteinte");
-        m_goal_pose = m_current_pose;
-        publishStratMovement();
         return false;
     }
-
-    const bool l_aligned = alignInPlace(l_theta, rclcpp::Duration(5, 0));
-    override_gear = krabi_msgs::msg::StratMovement::FORWARD_OR_REVERSE;
     updateCurrentPose();
-    m_goal_pose = m_current_pose;
-    startAngular();
-    m_strat_mvnt.orient = krabi_msgs::msg::StratMovement::STOP_ANGULAR;
-    publishStratMovement();
-    RCLCPP_INFO_STREAM(this->get_logger(), "go_to_start terminé, pose : " << m_current_pose);
-    return l_aligned;
+    RCLCPP_INFO_STREAM(this->get_logger(), "Au départ, pose : " << m_current_pose);
+    return true;
 }
 
 void GoalStrat::updateMotorsCurrent(krabi_msgs::msg::MotorsCurrent::SharedPtr a_msg)
@@ -460,7 +514,7 @@ bool GoalStrat::waitForWallContact(rclcpp::Duration a_timeout)
 /**
  * @brief Appelle correct_pose (asynchrone + attente avec timeout).
  */
-bool GoalStrat::callCorrectPose(Wall a_wall, Angle a_theta, Distance a_coord)
+bool GoalStrat::callCorrectPose(krabi_msgs::srv::CorrectPose::Request::SharedPtr a_request)
 {
     if (!m_correct_pose_client->wait_for_service(std::chrono::duration<double>(
           m_recalage.service_timeout)))
@@ -469,21 +523,7 @@ bool GoalStrat::callCorrectPose(Wall a_wall, Angle a_theta, Distance a_coord)
         return false;
     }
 
-    auto l_req = std::make_shared<krabi_msgs::srv::CorrectPose::Request>();
-    l_req->theta = static_cast<double>(a_theta);
-    l_req->set_theta = true;
-    if (isXWall(a_wall))
-    {
-        l_req->x = static_cast<double>(a_coord);
-        l_req->set_x = true;
-    }
-    else
-    {
-        l_req->y = static_cast<double>(a_coord);
-        l_req->set_y = true;
-    }
-
-    auto l_future = m_correct_pose_client->async_send_request(l_req);
+    auto l_future = m_correct_pose_client->async_send_request(a_request);
     // Pas de spin_until_future_complete ici (on est dans un callback) : l'executor
     // multithread traite la réponse dans m_recalage_cb_group.
     if (l_future.wait_for(std::chrono::duration<double>(m_recalage.service_timeout))
@@ -506,17 +546,11 @@ bool GoalStrat::callCorrectPose(Wall a_wall, Angle a_theta, Distance a_coord)
 /**
  * @brief Recalage sur un mur.
  * @param a_wall le mur visé
+ * @param a_clearance distance dont on s'écarte du mur ensuite (m)
  * @param a_reverse true = contact par l'arrière (le robot recule vers le mur)
  */
-bool GoalStrat::recalageBordure(Wall a_wall, bool a_reverse)
+bool GoalStrat::recalageBordure(Wall a_wall, double a_clearance, bool a_reverse)
 {
-    if (m_recalage.use_lidar_loc)
-    {
-        RCLCPP_WARN(this->get_logger(),
-                    "Recalage désactivé en mode use_lidar_loc (AMCL publie map->odom)");
-        return false;
-    }
-
     // Cap au contact : dos au mur => on regarde vers l'intérieur de la table
     const double l_inward = inwardHeading(a_wall);
     const Angle l_heading = AngleTools::wrapAngle(Angle(a_reverse ? l_inward : l_inward + M_PI));
@@ -589,7 +623,12 @@ bool GoalStrat::recalageBordure(Wall a_wall, bool a_reverse)
         }
 
         // 5. Correction de map -> odom
-        l_corrected = callCorrectPose(a_wall, l_heading, l_coord);
+        auto l_request = std::make_shared<krabi_msgs::srv::CorrectPose::Request>();
+        l_request->theta = static_cast<double>(l_heading);
+        l_request->set_theta = true;
+        (isXWall(a_wall) ? l_request->x : l_request->y) = static_cast<double>(l_coord);
+        (isXWall(a_wall) ? l_request->set_x : l_request->set_y) = true;
+        l_corrected = callCorrectPose(l_request);
 
         // La pose map a sauté : nouvelle pose courante comme cible, pour que Core ne reparte
         // pas vers la cible d'avant correction.
@@ -609,7 +648,7 @@ bool GoalStrat::recalageBordure(Wall a_wall, bool a_reverse)
     updateCurrentPose();
     Position l_target = goal_logic::straightLineTarget(m_current_pose.getPosition(),
                                                        m_current_pose.getAngle(),
-                                                       Distance(m_recalage.clearance),
+                                                       Distance(a_clearance),
                                                        !a_reverse /* sensRecule */);
     m_goal_pose.setPosition(l_target);
     m_goal_pose.setAngle(m_current_pose.getAngle());
@@ -617,47 +656,98 @@ bool GoalStrat::recalageBordure(Wall a_wall, bool a_reverse)
                               : krabi_msgs::msg::StratMovement::REVERSE;
     m_strat_mvnt.orient = krabi_msgs::msg::StratMovement::GO_TO_GOALPOSE_POSITION;
 
-    const auto l_deadline = this->now() + rclcpp::Duration(3, 0);
-    while (this->now() < l_deadline && !m_tirette_filter.started())
+    const auto l_deadline = this->now() + rclcpp::Duration::from_seconds(3. + 10. * a_clearance);
+    bool l_clear = false;
+    while (!l_clear && this->now() < l_deadline && !m_tirette_filter.started())
     {
         publishStratMovement();
         usleep(50000);
         updateCurrentPose();
-        if ((m_current_pose.getPosition() - l_target).getNorme() < REACH_DIST)
-        {
-            break;
-        }
+        l_clear = (m_current_pose.getPosition() - l_target).getNorme() < REACH_DIST;
     }
     override_gear = krabi_msgs::msg::StratMovement::FORWARD_OR_REVERSE;
     updateCurrentPose();
     m_goal_pose = m_current_pose;
     publishStratMovement();
 
+    if (m_tirette_filter.started())
+    {
+        RCLCPP_INFO(this->get_logger(), "Recalage interrompu : le match démarre");
+        return false;
+    }
+    if (!l_clear)
+    {
+        // La suite de la séquence suppose le robot écarté du mur (place pour pivoter)
+        RCLCPP_ERROR(this->get_logger(), "Recalage: dégagement impossible, arrêt");
+        return false;
+    }
+
     RCLCPP_INFO_STREAM(this->get_logger(),
                        "Recalage " << wallName(a_wall) << " terminé, pose: " << m_current_pose);
-    return !m_tirette_filter.started();
+    return true;
 }
 
 /**
- * @brief Recalage dans le coin du nid : mur latéral x puis mur y = -1.
- * Tout est relatif à la pose courante (odom) : on ne vise aucune position absolue.
- * Symétrie (useXSymetry, voir positionC) : bleu = côté x < 0, jaune = côté x > 0.
+ * @brief Le robot est posé dans la zone : sa pose devient celle de la zone (approximative,
+ * la séquence la corrige ensuite contre les murs).
  */
-bool GoalStrat::recalageInitial()
+bool GoalStrat::setZonePose(const recalage::Zone& a_zone)
 {
-    const Wall l_x_wall = m_is_blue ? Wall::X_MIN : Wall::X_MAX;
-
-    RCLCPP_INFO(this->get_logger(), "Recalage initial (%s)", m_is_blue ? "bleu" : "jaune");
-    if (!recalageBordure(l_x_wall, true))
+    auto l_request = std::make_shared<krabi_msgs::srv::CorrectPose::Request>();
+    l_request->x = a_zone.pose.x;
+    l_request->y = a_zone.pose.y;
+    l_request->theta = a_zone.pose.theta;
+    l_request->set_x = l_request->set_y = l_request->set_theta = true;
+    if (!callCorrectPose(l_request))
     {
-        RCLCPP_ERROR(this->get_logger(), "Recalage initial: échec sur le mur x");
         return false;
     }
-    if (!recalageBordure(Wall::Y_MIN, true))
-    {
-        RCLCPP_ERROR(this->get_logger(), "Recalage initial: échec sur le mur y");
-        return false;
-    }
-    RCLCPP_INFO(this->get_logger(), "Recalage initial réussi");
+    usleep(100000); // laisse le temps au nouveau map->odom d'arriver dans le buffer TF
     return true;
+}
+
+/**
+ * @brief Exécute la séquence d'une zone. S'arrête à la première étape en échec.
+ */
+bool GoalStrat::runZone(const recalage::Zone& a_zone)
+{
+    RCLCPP_INFO(this->get_logger(),
+                "Recalage zone '%s' (%s)",
+                a_zone.name.c_str(),
+                m_is_blue ? "bleu" : "jaune");
+    for (size_t i = 0; i < a_zone.steps.size(); ++i)
+    {
+        RCLCPP_INFO(this->get_logger(),
+                    "Étape %zu/%zu : %s",
+                    i + 1,
+                    a_zone.steps.size(),
+                    a_zone.steps[i].text.c_str());
+        if (!runStep(a_zone.steps[i]) || m_tirette_filter.started())
+        {
+            RCLCPP_ERROR(this->get_logger(),
+                         "Recalage zone '%s' : arrêt à l'étape %zu (%s)",
+                         a_zone.name.c_str(),
+                         i + 1,
+                         a_zone.steps[i].text.c_str());
+            return false;
+        }
+    }
+    return true;
+}
+
+bool GoalStrat::runStep(const recalage::Step& a_step)
+{
+    switch (a_step.type)
+    {
+    case recalage::Step::Type::WALL:
+        return recalageBordure(a_step.wall, a_step.clearance);
+    case recalage::Step::Type::GOTO:
+        return goToPosition(a_step.x, a_step.y);
+    case recalage::Step::Type::ROTATE:
+        return alignInPlace(Angle(a_step.theta),
+                            rclcpp::Duration::from_seconds(m_recalage.align_timeout));
+    case recalage::Step::Type::START:
+        return goToStartPose();
+    }
+    return false;
 }

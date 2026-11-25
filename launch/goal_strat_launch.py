@@ -2,7 +2,8 @@ from launch import LaunchDescription
 from launch_ros.actions import Node
 import launch_ros.actions
 from launch_ros.parameter_descriptions import ParameterValue
-from launch.substitutions import Command, LaunchConfiguration, PythonExpression
+from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution, PythonExpression
+from launch_ros.substitutions import FindPackageShare
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 
 def generate_launch_description():
@@ -37,7 +38,14 @@ def generate_launch_description():
         'use_lidar_loc',
         default_value='False'
     )
+    # Zones de recalage et leurs séquences
+    recalage_file_launch_arg = DeclareLaunchArgument(
+        'recalage_file',
+        default_value=PathJoinSubstitution([
+            FindPackageShare('goal_strategy'), 'config', 'recalage_2026.yaml'])
+    )
     return LaunchDescription([
+        recalage_file_launch_arg,
         use_lidar_loc_launch_arg,
         isBlue_launch_arg, xRobotPos_launch_arg, yRobotPos_launch_arg, zRobotOrientation_launch_arg,
         use_sim_time_launch_arg,
@@ -56,6 +64,7 @@ def generate_launch_description():
                         {"start_pose.x": ParameterValue(xRobotPos_value, value_type=float)},
                         {"start_pose.y": ParameterValue(yRobotPos_value, value_type=float)},
                         {"start_pose.theta": ParameterValue(zRobotOrientation_value, value_type=float)},
+                        {"recalage.file": ParameterValue(LaunchConfiguration('recalage_file'), value_type=str)},
                         # Lidar loc : AMCL publie map->odom, recalage bordure désactivé
                         {"recalage.use_lidar_loc": ParameterValue(use_lidar_loc_value, value_type=bool)}],
             respawn=True,

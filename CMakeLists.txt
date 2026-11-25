@@ -30,6 +30,7 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(diagnostic_updater REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 include_directories(include)
 
@@ -68,9 +69,10 @@ add_executable(goal_strategy_node
   src/goal/actuators2025.cpp
   src/goal/billig.cpp
   src/goal/recalage.cpp
+  src/goal/recalage_sequence.cpp
 )
 
-target_link_libraries(goal_strategy_node krabilib_strat krabilib )
+target_link_libraries(goal_strategy_node krabilib_strat krabilib yaml-cpp::yaml-cpp)
 
 ament_target_dependencies(goal_strategy_node 
   rclcpp
@@ -130,6 +132,15 @@ if(BUILD_TESTING)
   )
   target_include_directories(test_tirette_filter PRIVATE include)
 
+  ament_add_gtest(test_recalage_sequence
+    test/test_recalage_sequence.cpp
+    src/goal/recalage_sequence.cpp
+  )
+  target_include_directories(test_recalage_sequence PRIVATE include)
+  target_link_libraries(test_recalage_sequence yaml-cpp::yaml-cpp)
+  target_compile_definitions(test_recalage_sequence PRIVATE
+    RECALAGE_YAML="${CMAKE_CURRENT_SOURCE_DIR}/config/recalage_2026.yaml")
+
   # --- Tier 2: seasonal characterization of THIS YEAR's graph ---
   # The test body is guarded by YEAR_2026 (from goal.h): when the year flips it
   # compiles to an empty main and is replaced by test_coupe2027.cpp.
@@ -170,9 +181,10 @@ if(BUILD_TESTING)
     src/goal/actuators2025.cpp
     src/goal/billig.cpp
     src/goal/recalage.cpp
+    src/goal/recalage_sequence.cpp
   )
   target_include_directories(test_goal_strat_node PRIVATE include)
-  target_link_libraries(test_goal_strat_node krabilib_strat krabilib)
+  target_link_libraries(test_goal_strat_node krabilib_strat krabilib yaml-cpp::yaml-cpp)
   ament_target_dependencies(test_goal_strat_node
     rclcpp geometry_msgs std_msgs krabi_msgs visualization_msgs
     tf2_eigen tf2_ros tf2_geometry_msgs diagnostic_updater std_srvs)
@@ -180,7 +192,7 @@ endif()
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 
-install(DIRECTORY launch
+install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME})
 
 install(DIRECTORY include/krabilib

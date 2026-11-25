@@ -45,6 +45,7 @@
 #include <std_srvs/srv/trigger.hpp>
 
 #include "goal_strategy/publisherCreator.h"
+#include "goal_strategy/recalage_sequence.h"
 #include "goal_strategy/subscriptionCreator.h"
 #include "krabilib/pose.h"
 #include "krabilib/tirette_filter.h"
@@ -52,15 +53,6 @@
 // The distance to a goal (in m)
 #define REACH_DIST 0.02                            // m
 #define REACH_ANG AngleTools::deg2rad(AngleDeg(2)) // °
-
-/// Bordures de la table, dans le repère map (origine au centre, table 3 m x 2 m)
-enum class Wall
-{
-    X_MIN, // x = -1.5
-    X_MAX, // x = +1.5
-    Y_MIN, // y = -1.0
-    Y_MAX  // y = +1.0
-};
 
 enum VacuumState
 {
@@ -132,11 +124,14 @@ private:
     void recalage_bordure();
 
     // ---- Recalage automatique sur bordure ----
-    bool recalageBordure(Wall a_wall, bool a_reverse = true);
-    bool recalageInitial();
+    bool recalageBordure(Wall a_wall, double a_clearance, bool a_reverse = true);
+    void loadRecalageZones();
+    bool setZonePose(const recalage::Zone& a_zone);
+    bool runZone(const recalage::Zone& a_zone);
+    bool runStep(const recalage::Step& a_step);
     bool alignInPlace(Angle a_angle, rclcpp::Duration a_timeout);
     bool waitForWallContact(rclcpp::Duration a_timeout);
-    bool callCorrectPose(Wall a_wall, Angle a_theta, Distance a_coord);
+    bool callCorrectPose(krabi_msgs::srv::CorrectPose::Request::SharedPtr a_request);
     void updateMotorsCurrent(krabi_msgs::msg::MotorsCurrent::SharedPtr a_msg);
     void declareRecalageParameters();
 
@@ -147,11 +142,13 @@ private:
         PRE_MATCH_RECALAGE,
         PRE_MATCH_GO_TO_START
     };
-    void requestPreMatchAction(PreMatchRequest a_request,
-                               std::shared_ptr<std_srvs::srv::Trigger::Response> a_res);
+    bool requestPreMatchAction(PreMatchRequest a_request,
+                               const std::string& a_zone,
+                               std::string& a_message);
     bool handlePreMatchRequest();
     bool setPreMatchMotion(bool a_enable);
     bool goToStartPose();
+    bool goToPosition(double a_x, double a_y);
     void stopPreMatchMotion();
     bool sleepUnlessMatch(double a_seconds);
     bool getOdomStamp(rclcpp::Time& a_stamp);
@@ -314,7 +311,6 @@ private:
         double timeout;        // s, timeout global de la poussée
         double align_timeout;  // s, timeout de l'alignement
         double service_timeout; // s, attente de la réponse de correct_pose
-        double clearance;      // m, dégagement après recalage
         double min_push_dist;  // m, déplacement minimal avant d'accepter un contact
         double max_correction_dist;  // m, correction refusée au-delà
         double max_correction_angle; // rad, correction refusée au-delà
@@ -329,6 +325,8 @@ private:
     // ---- Actions avant match ----
     double m_start_pose_x, m_start_pose_y, m_start_pose_theta; // pose de départ (map)
     std::atomic<int> m_pre_match_request{ PRE_MATCH_NONE };
+    std::string m_pre_match_zone; // écrit avant m_pre_match_request, lu après
+    recalage::Config m_recalage_config;
     std::atomic<bool> m_pre_match_busy{ false };
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr m_start_recalage_srv;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr m_go_to_start_srv;
