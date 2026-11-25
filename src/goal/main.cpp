@@ -504,7 +504,6 @@ GoalStrat::GoalStrat()
     m_strat_mvnt.reverse_gear = krabi_msgs::msg::StratMovement::FORWARD_OR_REVERSE; // don't care
 
     m_state = State::WAIT_TIRETTE_IN;
-    m_tirette = true;
     m_vacuum_level = 0.f;
     m_vacuum_state = OPEN_AIR;
 
@@ -676,6 +675,8 @@ GoalStrat::GoalStrat()
         &GoalStrat::grabFlipDropCallback, this, std::placeholders::_1, std::placeholders::_2));
 #endif
 
+    declareRecalageParameters(); // recalage bordure (src/goal/recalage.cpp)
+
     m_timer = this->create_wall_timer(100ms, std::bind(&GoalStrat::loop, this));
 }
 
@@ -772,7 +773,7 @@ void GoalStrat::updateDigitalReads([[maybe_unused]] std_msgs::msg::Byte::SharedP
  */
 void GoalStrat::updateTirette(std_msgs::msg::Bool::SharedPtr tirette)
 {
-    m_tirette = tirette->data;
+    m_tirette_filter.update(tirette->data);
 }
 
 /**
@@ -1497,7 +1498,7 @@ void GoalStrat::loop()
     {
     case State::WAIT_TIRETTE_IN:
         RCLCPP_INFO_STREAM(this->get_logger(), "Waiting for tirette to be in" << std::endl);
-        if (!m_tirette)
+        if (m_tirette_filter.armed())
         {
             RCLCPP_INFO_STREAM(this->get_logger(), "Tirette is in!" << std::endl);
 
@@ -1518,9 +1519,15 @@ void GoalStrat::loop()
         m_state = State::WAIT_TIRETTE;
         break;
     case State::WAIT_TIRETTE:
+        // Action avant match demandée (start_recalage / go_to_start) : bloquant
+        if (handlePreMatchRequest())
+        {
+            break;
+        }
         RCLCPP_INFO_STREAM(this->get_logger(), "Waiting for tirette to be out" << std::endl);
 
-        if (m_state == State::WAIT_TIRETTE && m_tirette && m_remainig_time > rclcpp::Duration(1, 0))
+        if (m_state == State::WAIT_TIRETTE && m_tirette_filter.started()
+            && m_remainig_time > rclcpp::Duration(1, 0))
         {
             RCLCPP_INFO_STREAM(this->get_logger(), "Go for Run!" << std::endl);
 

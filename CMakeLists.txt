@@ -29,6 +29,7 @@ find_package(tf2_eigen REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(diagnostic_updater REQUIRED)
+find_package(std_srvs REQUIRED)
 
 include_directories(include)
 
@@ -66,6 +67,7 @@ add_executable(goal_strategy_node
   src/goal/stepper.cpp
   src/goal/actuators2025.cpp
   src/goal/billig.cpp
+  src/goal/recalage.cpp
 )
 
 target_link_libraries(goal_strategy_node krabilib_strat krabilib )
@@ -81,6 +83,7 @@ ament_target_dependencies(goal_strategy_node
   tf2_ros
   tf2_geometry_msgs
   diagnostic_updater
+  std_srvs
   #tf_conversions
   #sensor_msgs
 )
@@ -138,7 +141,7 @@ if(BUILD_TESTING)
   target_link_libraries(test_coupe2026 krabilib_strat krabilib)
   ament_target_dependencies(test_coupe2026
     rclcpp geometry_msgs std_msgs krabi_msgs visualization_msgs
-    tf2_eigen tf2_ros tf2_geometry_msgs diagnostic_updater)
+    tf2_eigen tf2_ros tf2_geometry_msgs diagnostic_updater std_srvs)
 
   # --- Integration tests for the mission-planning engine (StrategieV3 + Dijkstra + Etape) ---
   # Evergreen: drives a custom minimal graph, no competition data, no ROS node.
@@ -166,12 +169,13 @@ if(BUILD_TESTING)
     src/goal/stepper.cpp
     src/goal/actuators2025.cpp
     src/goal/billig.cpp
+    src/goal/recalage.cpp
   )
   target_include_directories(test_goal_strat_node PRIVATE include)
   target_link_libraries(test_goal_strat_node krabilib_strat krabilib)
   ament_target_dependencies(test_goal_strat_node
     rclcpp geometry_msgs std_msgs krabi_msgs visualization_msgs
-    tf2_eigen tf2_ros tf2_geometry_msgs diagnostic_updater)
+    tf2_eigen tf2_ros tf2_geometry_msgs diagnostic_updater std_srvs)
 endif()
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
